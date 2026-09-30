@@ -35,6 +35,11 @@ class SignalrFlutterPlugin : FlutterPlugin, SignalrApi.SignalRHostApi {
         result: SignalrApi.Result<String>?
     ) {
         try {
+            // LEGOAS PATCH: the app can call connect() more than once. Without
+            // this, the old connection keeps running (heartbeat, reconnect,
+            // duplicate hub events) with nothing referencing it.
+            releaseConnection()
+
             connection =
                 if (connectionOptions.queryString?.isNotEmpty() == true) {
                     HubConnection(
@@ -55,11 +60,15 @@ class SignalrFlutterPlugin : FlutterPlugin, SignalrApi.SignalRHostApi {
             }
 
             hub = connection.createHubProxy(connectionOptions.hubName)
+            val currentConnection = connection
 
             connectionOptions.hubMethods?.forEach { methodName ->
                 hub.on(methodName, { res ->
                     Handler(Looper.getMainLooper()).post {
-                        signalrApi.onNewMessage(methodName, res) { }
+                        // Drop messages from a connection that has already been replaced.
+                        if (connection === currentConnection) {
+                            signalrApi.onNewMessage(methodName, res) { }
+                        }
                     }
                 }, String::class.java)
             }
@@ -152,8 +161,27 @@ class SignalrFlutterPlugin : FlutterPlugin, SignalrApi.SignalRHostApi {
     override fun stop(result: SignalrApi.Result<Void>?) {
         try {
             connection.stop()
+            // LEGOAS PATCH: the original never completed on success.
+            result?.success(null)
         } catch (ex: Exception) {
             result?.error(ex)
+        }
+    }
+
+    /** Detaches every callback from the old connection, then stops it. */
+    private fun releaseConnection() {
+        if (!this::connection.isInitialized) return
+        val old = connection
+        old.connected(null)
+        old.reconnected(null)
+        old.reconnecting(null)
+        old.closed(null)
+        old.connectionSlow(null)
+        old.error(null)
+        try {
+            old.stop()
+        } catch (ex: Exception) {
+            // The old connection is being discarded; a stop failure doesn't matter.
         }
     }
 
@@ -187,8 +215,12 @@ class SignalrFlutterPlugin : FlutterPlugin, SignalrApi.SignalRHostApi {
                 }
             }
 
+            // LEGOAS PATCH: the original rethrew here, on the SignalR thread
+            // (app crash), and never completed the Future on the Dart side.
             res.onError { throwable ->
-                throw throwable
+                Handler(Looper.getMainLooper()).post {
+                    result?.error(throwable)
+                }
             }
         } catch (ex: Exception) {
             result?.error(ex)
