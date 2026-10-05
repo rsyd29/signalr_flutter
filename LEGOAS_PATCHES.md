@@ -30,6 +30,7 @@ so `pubspec.lock` pins the new commit.
 | 2 | `SignalRFlutterPlugin.kt::connect` | Every `connect()` creates a new `HubConnection` and leaves the old one running (heartbeat, reconnect, duplicate hub events). | `releaseConnection()` detaches the old callbacks and stops the old connection. Hub messages from a replaced connection are dropped. |
 | 3 | `SignalRFlutterPlugin.kt::invokeMethod` | `res.onError { throw throwable }` throws on the SignalR thread (a crash) and never completes the Future on the Dart side. | Completes with `result.error(...)` on the main thread. |
 | 4 | `SignalRFlutterPlugin.kt::stop` | Never calls `result.success`, so the Dart `stop()` never completes. | Calls `result.success(null)` after `connection.stop()`. |
+| 5 | `android/src/main/java/microsoft/aspnet/signalr/client/SignalRFuture.java` | `cancel()` iterates the `mOnCancelled` `ArrayList` on one thread (`Connection.onError` → `disconnect` → `UpdateableCancellableFuture.cancel`, on a `NetworkRunnable` thread) while another thread adds a callback through `onCancelled()`. That gives a fatal crash: `java.util.ConcurrentModificationException` in `SignalRFuture.cancel` (Crashlytics, LelangKu 2.0.1 – 2.2.0). | `mOnCancelled` is a `CopyOnWriteArrayList`: `add()` is thread-safe and `cancel()` iterates a snapshot. Behaviour is otherwise unchanged (a callback added after `cancel()` is still not run). |
 
 ### How patch #1 is packaged
 `Connection.java` was taken out of `signalr-client-sdk.jar`, along with
@@ -38,5 +39,13 @@ so `pubspec.lock` pins the new commit.
 
 - Original jar SHA-256: `62bfa0765548e5529d96d3e36ae11f1fd4971542231907a89719f4f178dcde05`
 - Jar after removing `Connection*`: `aea49ea847442e2ee9df10672a0bdd5430e9e783446805e2af9fe45369ad942c`
+
+### How patch #5 is packaged
+Same as patch #1: `SignalRFuture.java` was taken out of `signalr-client-sdk.jar`
+(the jar ships its sources), along with `SignalRFuture.class` (it has no inner
+classes), and moved to `android/src/main/java/...`. Apart from the patch, the
+source is identical to the one in the jar.
+
+- Jar after also removing `SignalRFuture*`: `63e84f8d02f213dad2cf080249761eb9136887bfbde42713c14e43dc25258b46`
 
 iOS (`ios/`) is unchanged.
