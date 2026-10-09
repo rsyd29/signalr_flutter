@@ -21,6 +21,12 @@ public class SwiftSignalrFlutterPlugin: NSObject, FlutterPlugin, FLTSignalRHostA
   }
 
   public func connect(_ connectionOptions: FLTConnectionOptions, completion: @escaping (String?, FlutterError?) -> Void) {
+    // LEGOAS PATCH: every connect() used to create a new SignalR (WKWebView)
+    // and leave the old one running: it kept its connection, its hub
+    // handlers, and its status callbacks (a stale "disconnected" overwrote
+    // the status of the current connection).
+    releaseConnection()
+
     connection = SignalR(connectionOptions.baseUrl ?? "")
 
     if let queryString = connectionOptions.queryString, !queryString.isEmpty {
@@ -123,9 +129,27 @@ public class SwiftSignalrFlutterPlugin: NSObject, FlutterPlugin, FLTSignalRHostA
   public func stop(completion: @escaping (FlutterError?) -> Void) {
     if let connection = self.connection {
       connection.stop()
+      // LEGOAS PATCH: the original never completed on success.
+      completion(nil)
     } else {
       completion(FlutterError(code: "platform-error", message: "SignalR Connection not found or null", details: "Start SignalR connection first"))
     }
+  }
+
+  /// LEGOAS PATCH: detaches every callback from the old connection, then
+  /// stops it and removes its web view.
+  private func releaseConnection() {
+    guard let old = connection else { return }
+    old.starting = nil
+    old.reconnecting = nil
+    old.connected = nil
+    old.reconnected = nil
+    old.disconnected = nil
+    old.connectionSlow = nil
+    old.error = nil
+    old.dispose()
+    hub = nil
+    connection = nil
   }
 
   public func isConnected(completion: @escaping (NSNumber?, FlutterError?) -> Void) {

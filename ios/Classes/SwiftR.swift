@@ -91,6 +91,8 @@ open class SignalR: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
 
   var internalID: String!
   var ready = false
+  // LEGOAS PATCH: set by dispose(); late web view messages are ignored.
+  var disposed = false
 
   public var signalRVersion: SignalRVersion = .v2_4_3
   public var useWKWebView = true
@@ -277,13 +279,40 @@ open class SignalR: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   open func start() {
     if ready {
       runJavaScript("start()")
-    } else {
+    } else if wkWebView == nil {
       connect()
     }
+    // LEGOAS PATCH: else the page is still loading and its "ready" message
+    // starts the connection. Calling connect() again created a second web
+    // view for the same connection.
   }
 
   open func stop() {
     runJavaScript("swiftR.connection.stop()")
+  }
+
+  /// LEGOAS PATCH: stops the connection and releases the web view. The
+  /// object must not be used afterwards.
+  open func dispose() {
+    guard !disposed else { return }
+    disposed = true
+    ready = false
+    state = .disconnected
+    hubs.removeAll()
+    jsQueue.removeAll()
+    SwiftR.connections.removeAll { $0 === self }
+
+    guard let view = wkWebView else { return }
+    wkWebView = nil
+    view.navigationDelegate = nil
+    view.stopLoading()
+    // Tell the server (abort) before the web view goes away. The closure
+    // keeps the view alive until the script has run.
+    view.evaluateJavaScript("if (window.swiftR && swiftR.connection) { swiftR.connection.stop(); }") { _, _ in
+      // The content controller retains its message handler (this object).
+      view.configuration.userContentController.removeScriptMessageHandler(forName: "interOp")
+      view.removeFromSuperview()
+    }
   }
 
   func processMessage(_ json: [String: Any]) {
@@ -395,6 +424,8 @@ open class SignalR: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   // http://stackoverflow.com/questions/26514090/wkwebview-does-not-run-javascriptxml-http-request-with-out-adding-a-parent-vie#answer-26575892
   open func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     #if os(iOS)
+    // LEGOAS PATCH: wkWebView is nil after dispose().
+    guard !disposed, wkWebView != nil else { return }
     UIApplication.shared.keyWindow?.addSubview(wkWebView)
     #endif
   }
@@ -402,6 +433,9 @@ open class SignalR: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
   // MARK: - WKScriptMessageHandler
 
   open func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    // LEGOAS PATCH: a message can still arrive after dispose(), when
+    // wkWebView is nil (implicitly unwrapped: it would crash).
+    guard !disposed, wkWebView != nil else { return }
     if let id = message.body as? String {
       wkWebView.evaluateJavaScript("readMessage('\(id)')", completionHandler: { [weak self] (msg, err) in
         if let m = msg as? [String: Any] {
